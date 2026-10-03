@@ -260,3 +260,61 @@ class TestReinjectionBoundsAndRedaction:
         secret = "ghp_" + "a1B2" * 6
         out = _reinject_pruned_skill_markers("body", [f"x {secret}"])
         assert secret not in out
+
+
+class TestMarkerEmitReleasesSkillViewDedup:
+    """The marker asks for a skill_view reload, so the repeat-view dedup must be released where the
+    marker is emitted — a boundary-only reset lets a demotion that lands on a pass reporting no change
+    keep the entry alive, and the reload is then answered with an 'unchanged' stub (#112763)."""
+
+    TASK = "t-ghost-dedup"
+
+    @staticmethod
+    def _seed(tmp_path, name="docker-management"):
+        from tools.skills_tool_dedup import _record_skill_view, reset_skill_view_dedup
+
+        md = tmp_path / "SKILL.md"
+        md.write_text("# s\n", encoding="utf-8")
+        reset_skill_view_dedup(TestMarkerEmitReleasesSkillViewDedup.TASK)
+        _record_skill_view(
+            TestMarkerEmitReleasesSkillViewDedup.TASK, name, None,
+            {"name": name, "_source_path": str(md)},
+        )
+
+    @staticmethod
+    def _stubbed(name="docker-management"):
+        from tools.skills_tool_dedup import _check_skill_view_dedup
+
+        return _check_skill_view_dedup(TestMarkerEmitReleasesSkillViewDedup.TASK, name, None) is not None
+
+    def test_emit_releases_the_entry(self, tmp_path):
+        self._seed(tmp_path)
+        assert self._stubbed() is True
+        summary = _summarize_tool_result(
+            "skill_view", '{"name":"docker-management"}', "x" * 6000
+        )
+        assert _skill_pruned_marker("docker-management") in summary
+        assert self._stubbed() is False
+
+    def test_small_body_without_marker_keeps_the_entry(self, tmp_path):
+        # No marker: the body was never demoted to "instructions are gone", so the stub stays valid.
+        self._seed(tmp_path)
+        summary = _summarize_tool_result(
+            "skill_view", '{"name":"docker-management"}', "x" * 1234
+        )
+        assert SKILL_PRUNED_MARKER_PREFIX not in summary
+        assert self._stubbed() is True
+
+    def test_qualified_name_still_releases_the_entry(self, tmp_path):
+        self._seed(tmp_path)
+        summary = _summarize_tool_result(
+            "skill_view", '{"name":"media:docker-management"}', "x" * 6000
+        )
+        assert SKILL_PRUNED_MARKER_PREFIX in summary
+        assert self._stubbed() is False
+
+    def test_reinjection_also_releases_the_entry(self, tmp_path):
+        self._seed(tmp_path)
+        out = _reinject_pruned_skill_markers("body", ["docker-management"])
+        assert _skill_pruned_marker("docker-management") in out
+        assert self._stubbed() is False

@@ -62,9 +62,7 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
         # 'category/skill' and bare-name views coalesce.
         for key, (src, mtime_ns, size) in list(cache.items()):
             rec_name, rec_fp = key
-            if rec_fp != (file_path or "") or (
-                    rec_name != n and not n.endswith("/" + rec_name)
-                    and not rec_name.endswith("/" + n) and n.split(":")[-1] != rec_name):
+            if rec_fp != (file_path or "") or not _names_match(rec_name, n):
                 continue
             try:
                 st = os.stat(src)
@@ -79,6 +77,37 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
                 "file": file_path or "SKILL.md", "dedup": True, "content_returned": False,
                 "message": _SKILL_VIEW_DEDUP_MESSAGE}, ensure_ascii=False)
     return None
+
+
+def _names_match(recorded: str, queried: str) -> bool:
+    """True when *recorded* (the resolved name) and *queried* (raw or qualified form) denote the
+    same skill: bare name, ``category/name`` and ``plugin:name`` forms all coalesce."""
+    rec, n = str(recorded), str(queried)
+    return (rec == n or n.endswith("/" + rec) or rec.endswith("/" + n)
+            or n.split(":")[-1] == rec or rec.split(":")[-1] == n.split("/")[-1])
+
+
+def invalidate_skill_view_dedup_for_skill(name: str) -> int:
+    """Drop every recorded skill_view for *name* across all tasks; returns how many were dropped.
+
+    Called where a skill body is demoted to the canonical ``[SKILL_PRUNED: ...]`` marker: the marker
+    states the instructions are gone and asks for a ``skill_view`` reload, so the repeat-view dedup
+    must not answer "unchanged" for it — otherwise the reload the marker asks for is refused and the
+    skill is unrecoverable for the rest of the session. Doing this at EMIT time (rather than only at a
+    compaction / committed-prune boundary) closes the window where a demotion lands on a pass that
+    reports no change, which keeps the dedup entry alive.
+    """
+    dropped = 0
+    with _skill_view_tracker_lock:
+        for task_id in list(_skill_view_tracker):
+            cache = _skill_view_tracker[task_id]
+            for key in list(cache):
+                if _names_match(key[0], name):
+                    cache.pop(key, None)
+                    dropped += 1
+            if not cache:
+                _skill_view_tracker.pop(task_id, None)
+    return dropped
 
 
 def reset_skill_view_dedup(task_id: str | None = None) -> None:
