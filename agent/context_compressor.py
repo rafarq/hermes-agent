@@ -921,10 +921,15 @@ _PRUNED_SKILLS_SECTION_HEADING = "## Pruned Skills"
 def _reinject_pruned_skill_markers(summary: str, skill_names: list[str]) -> str:
     """Deterministically restore prune markers the summarizer dropped.
     Presence is checked against the canonical marker string; the appended block is plain body text (no
-    handoff prefix/scaffolding) and is redacted like all others."""
+    handoff prefix/scaffolding) and is redacted like all others. Every re-injected marker also releases
+    the repeat-view dedup entry, so the reload it asks for cannot be refused by an "unchanged" stub."""
     missing = [_skill_pruned_marker(name) for name in skill_names if _skill_pruned_marker(name) not in summary]
     if not missing:
         return summary
+    with contextlib.suppress(Exception):
+        from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+        for name in skill_names:
+            invalidate_skill_view_dedup_for_skill(name)
     block = (
         "\n\n" + _PRUNED_SKILLS_SECTION_HEADING + "\n"
         + "\n".join(missing)
@@ -1716,6 +1721,13 @@ def _sum_skill_view(name, args, content, content_len, line_count):
     skill = args.get("name", "?")
     # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
     marker = " " + _skill_pruned_marker(str(skill)) if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS else ""
+    if marker:
+        # The marker asks for a skill_view reload, so release the repeat-view dedup entry HERE, at
+        # emit time: a boundary-only reset misses demotions that land on a pass reporting no change,
+        # and the reload the marker asks for is then answered with an "unchanged" stub (#112763).
+        with contextlib.suppress(Exception):
+            from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+            invalidate_skill_view_dedup_for_skill(str(skill))
     return f"[skill_view] name={skill} ({content_len:,} chars)" + marker
 
 

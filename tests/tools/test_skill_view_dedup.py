@@ -125,3 +125,67 @@ class TestSkillViewDedup:
         repeat = _view("demo-dedup-skill")
         assert repeat.get("dedup") is True
         assert repeat.get("content_returned") is False
+
+
+class TestPruneMarkerReleasesDedup:
+    """A body demoted to the canonical [SKILL_PRUNED: ...] marker must release the dedup entry at
+    EMIT time, or the reload the marker asks for is refused with an 'unchanged' stub (#112763)."""
+
+    def test_invalidate_returns_content_again(self, skills_home):
+        from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+
+        _view("demo-dedup-skill")
+        assert _view("demo-dedup-skill").get("dedup") is True
+        assert invalidate_skill_view_dedup_for_skill("demo-dedup-skill") == 1
+        reloaded = _view("demo-dedup-skill")
+        assert "Step one" in reloaded.get("content", "")
+        assert reloaded.get("dedup") is None
+
+    def test_invalidate_matches_qualified_forms(self, skills_home):
+        from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+
+        _view("demo-dedup-skill")
+        # The marker carries the name the model passed, which may be category- or plugin-qualified.
+        assert invalidate_skill_view_dedup_for_skill("media:demo-dedup-skill") == 1
+        assert "Step one" in _view("demo-dedup-skill").get("content", "")
+
+    def test_invalidate_leaves_other_skills_stubbed(self, skills_home):
+        from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+
+        other = skills_home / "skills" / "other-dedup-skill"
+        other.mkdir()
+        (other / "SKILL.md").write_text(
+            "---\nname: other-dedup-skill\ndescription: Other demo skill.\n---\n"
+            "# Other\n\nStep other: unrelated procedure.\n",
+            encoding="utf-8",
+        )
+        _view("demo-dedup-skill")
+        _view("other-dedup-skill")
+        assert invalidate_skill_view_dedup_for_skill("demo-dedup-skill") == 1
+        assert _view("demo-dedup-skill").get("dedup") is None
+        assert _view("other-dedup-skill").get("dedup") is True
+
+    def test_invalidate_unknown_skill_is_a_noop(self, skills_home):
+        from tools.skills_tool_dedup import invalidate_skill_view_dedup_for_skill
+
+        _view("demo-dedup-skill")
+        assert invalidate_skill_view_dedup_for_skill("no-such-skill") == 0
+        assert _view("demo-dedup-skill").get("dedup") is True
+
+    def test_marker_emit_then_view_returns_full_content(self, skills_home):
+        """End to end: the sequence that dead-ends today — view, body demoted to the marker, reload."""
+        from agent.context_compressor import (
+            SKILL_PRUNED_MARKER_PREFIX,
+            _summarize_tool_result,
+        )
+
+        _view("demo-dedup-skill")
+        assert _view("demo-dedup-skill").get("dedup") is True
+        summary = _summarize_tool_result(
+            "skill_view", '{"name":"demo-dedup-skill"}', "x" * 6000
+        )
+        assert SKILL_PRUNED_MARKER_PREFIX in summary
+        assert "demo-dedup-skill" in summary
+        reloaded = _view("demo-dedup-skill")
+        assert "Step one" in reloaded.get("content", "")
+        assert reloaded.get("dedup") is None
